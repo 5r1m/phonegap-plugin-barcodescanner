@@ -484,6 +484,15 @@ parentViewController:(UIViewController*)parentViewController
     AVCaptureSession* captureSession = [[AVCaptureSession alloc] init];
     self.captureSession = captureSession;
 
+    // Enable multi-window camera access for iPad (iOS 16+)
+    if (@available(iOS 16.0, *)) {
+        if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+            if ([captureSession respondsToSelector:@selector(setMultitaskingCameraAccessEnabled:)]) {
+                [captureSession setMultitaskingCameraAccessEnabled:YES];
+            }
+        }
+    }
+
        AVCaptureDevice* __block device = nil;
     if (self.isFrontCamera) {
 
@@ -765,9 +774,15 @@ parentViewController:(UIViewController*)parentViewController
 
 //--------------------------------------------------------------------------
 - (void)viewWillAppear:(BOOL)animated {
+    UIInterfaceOrientation interfaceOrientation;
+    
+    if (@available(iOS 13.0, *)) {
+        interfaceOrientation = self.view.window.windowScene.interfaceOrientation;
+    } else {
+        interfaceOrientation = [UIApplication sharedApplication].statusBarOrientation;
+    }
 
-    // set video orientation to what the camera sees
-    self.processor.previewLayer.connection.videoOrientation = [self interfaceOrientationToVideoOrientation:[UIApplication sharedApplication].statusBarOrientation];
+    self.processor.previewLayer.connection.videoOrientation = [self interfaceOrientationToVideoOrientation:interfaceOrientation];
 
     // this fixes the bug when the statusbar is landscape, and the preview layer
     // starts up in portrait (not filling the whole view)
@@ -776,21 +791,88 @@ parentViewController:(UIViewController*)parentViewController
 
 //--------------------------------------------------------------------------
 - (void)viewDidAppear:(BOOL)animated {
+    UIInterfaceOrientation interfaceOrientation;
+    
+    if (@available(iOS 13.0, *)) {
+        interfaceOrientation = self.view.window.windowScene.interfaceOrientation;
+    } else {
+        interfaceOrientation = [UIApplication sharedApplication].statusBarOrientation;
+    }
+    
     // setup capture preview layer
     AVCaptureVideoPreviewLayer* previewLayer = self.processor.previewLayer;
     previewLayer.frame = self.view.bounds;
     previewLayer.videoGravity = AVLayerVideoGravityResizeAspectFill;
 
     if ([previewLayer.connection isVideoOrientationSupported]) {
-        previewLayer.connection.videoOrientation = [self interfaceOrientationToVideoOrientation:[UIApplication sharedApplication].statusBarOrientation];
+        previewLayer.connection.videoOrientation = [self interfaceOrientationToVideoOrientation:interfaceOrientation];
     }
 
     [self.view.layer insertSublayer:previewLayer below:[[self.view.layer sublayers] objectAtIndex:0]];
 
     [self.view addSubview:[self buildOverlayView]];
+    
+    // Register for device orientation changes (iPad only)
+    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+        [[UIDevice currentDevice] beginGeneratingDeviceOrientationNotifications];
+        [[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(deviceOrientationDidChange:) name:UIDeviceOrientationDidChangeNotification object:nil];
+    }
+    
     [self startCapturing];
 
     [super viewDidAppear:animated];
+}
+
+//--------------------------------------------------------------------------
+- (void)viewWillDisappear:(BOOL)animated {
+    [super viewWillDisappear:animated];
+    
+    // Remove device orientation observer (iPad only)
+    if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
+        [[NSNotificationCenter defaultCenter] removeObserver:self name:UIDeviceOrientationDidChangeNotification object:nil];
+        [[UIDevice currentDevice] endGeneratingDeviceOrientationNotifications];
+    }
+}
+
+//--------------------------------------------------------------------------
+- (void)viewDidLayoutSubviews {
+    if (!self.processor) {
+        return;
+    }
+    
+    // Skip orientation updates on iPhone
+    if ([[UIDevice currentDevice] userInterfaceIdiom] != UIUserInterfaceIdiomPad) {
+        return;
+    }
+    
+    AVCaptureVideoPreviewLayer* previewLayer = self.processor.previewLayer;
+    if (!previewLayer) {
+        return;
+    }
+    
+    BOOL supportsVideoOrientation = NO;
+    
+    if (@available(iOS 17.0, *)) {
+        supportsVideoOrientation = [previewLayer.connection isVideoRotationAngleSupported:0];
+    } else if (@available(iOS 8.0, *)) {
+        supportsVideoOrientation = [previewLayer.connection isVideoOrientationSupported];
+    }
+    
+    if (supportsVideoOrientation) {
+        __weak typeof(self) weakSelf = self;
+        dispatch_async(dispatch_get_main_queue(), ^{
+            __strong typeof(weakSelf) strongSelf = weakSelf;
+            if (strongSelf && previewLayer) {
+                UIDeviceOrientation deviceOrientation = [UIDevice currentDevice].orientation;
+                BOOL isValidDeviceOrientation = (deviceOrientation >= UIDeviceOrientationPortrait && deviceOrientation <= UIDeviceOrientationLandscapeRight);
+                
+                if (isValidDeviceOrientation) {
+                    AVCaptureVideoOrientation videoOrientation = [strongSelf deviceOrientationToVideoOrientation:deviceOrientation];
+                    previewLayer.connection.videoOrientation = videoOrientation;
+                }
+            }
+        });
+    }
 }
 
 - (AVCaptureVideoOrientation)interfaceOrientationToVideoOrientation:(UIInterfaceOrientation)orientation {
@@ -998,6 +1080,65 @@ parentViewController:(UIViewController*)parentViewController
     return result;
 }
 
+//--------------------------------------------------------------------------
+// Handle device orientation changes
+- (void)deviceOrientationDidChange:(NSNotification *)notification {
+    (void)notification;
+    
+    AVCaptureVideoPreviewLayer* previewLayer = self.processor.previewLayer;
+    if (!previewLayer) {
+        return;
+    }
+    
+    UIDeviceOrientation deviceOrientation = [UIDevice currentDevice].orientation;
+    
+    // Skip invalid orientations (FaceUp, FaceDown, Unknown)
+    BOOL isValidDeviceOrientation = (deviceOrientation >= UIDeviceOrientationPortrait && deviceOrientation <= UIDeviceOrientationLandscapeRight);
+    
+    if (isValidDeviceOrientation) {
+        BOOL supportsVideoOrientation = NO;
+        
+        if (@available(iOS 17.0, *)) {
+            supportsVideoOrientation = [previewLayer.connection isVideoRotationAngleSupported:0];
+        } else if (@available(iOS 8.0, *)) {
+            supportsVideoOrientation = [previewLayer.connection isVideoOrientationSupported];
+        }
+        
+        if (supportsVideoOrientation) {
+            AVCaptureVideoOrientation videoOrientation = [self deviceOrientationToVideoOrientation:deviceOrientation];
+            
+            // Apply orientation change asynchronously with weak reference
+            __weak typeof(self) weakSelf = self;
+            dispatch_async(dispatch_get_main_queue(), ^{
+                __strong typeof(weakSelf) strongSelf = weakSelf;
+                if (strongSelf && previewLayer) {
+                    previewLayer.connection.videoOrientation = videoOrientation;
+                    [previewLayer layoutIfNeeded];
+                }
+            });
+        }
+    }
+}
+
+//--------------------------------------------------------------------------
+// Convert device orientation to camera orientation
+- (AVCaptureVideoOrientation)deviceOrientationToVideoOrientation:(UIDeviceOrientation)orientation {
+    switch (orientation) {
+        case UIDeviceOrientationPortrait:
+            return AVCaptureVideoOrientationPortrait;
+        case UIDeviceOrientationPortraitUpsideDown:
+            return AVCaptureVideoOrientationPortraitUpsideDown;
+        case UIDeviceOrientationLandscapeLeft:
+            // Device LandscapeLeft maps to Camera LandscapeRight
+            return AVCaptureVideoOrientationLandscapeRight;
+        case UIDeviceOrientationLandscapeRight:
+            // Device LandscapeRight maps to Camera LandscapeLeft
+            return AVCaptureVideoOrientationLandscapeLeft;
+        default:
+            return AVCaptureVideoOrientationPortrait;
+   }
+}
+
 #pragma mark CDVBarcodeScannerOrientationDelegate
 
 - (BOOL)shouldAutorotate
@@ -1007,7 +1148,11 @@ parentViewController:(UIViewController*)parentViewController
 
 - (UIInterfaceOrientation)preferredInterfaceOrientationForPresentation
 {
-    return [[UIApplication sharedApplication] statusBarOrientation];
+    if (@available(iOS 13.0, *)) {
+        return self.view.window.windowScene.interfaceOrientation;
+    } else {
+        return [UIApplication sharedApplication].statusBarOrientation;
+    }
 }
 
 - (NSUInteger)supportedInterfaceOrientations
