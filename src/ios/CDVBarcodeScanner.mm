@@ -487,8 +487,8 @@ parentViewController:(UIViewController*)parentViewController
     // Enable multi-window camera access for iPad (iOS 16+)
     if (@available(iOS 16.0, *)) {
         if ([[UIDevice currentDevice] userInterfaceIdiom] == UIUserInterfaceIdiomPad) {
-            if ([captureSession respondsToSelector:@selector(setMultitaskingCameraAccessEnabled:)]) {
-                [captureSession setMultitaskingCameraAccessEnabled:YES];
+            if (captureSession.isMultitaskingCameraAccessSupported) {
+                captureSession.multitaskingCameraAccessEnabled = YES;
             }
         }
     }
